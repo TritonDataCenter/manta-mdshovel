@@ -22,6 +22,7 @@ JSL_FILES_NODE	 = $(JS_FILES)
 JSSTYLE_FILES	 = $(JS_FILES)
 JSL_CONF_NODE	 = tools/jsl.node.conf
 
+include ./tools/mk/Makefile.defs
 include ./tools/mk/Makefile.node_modules.defs
 
 .PHONY: all

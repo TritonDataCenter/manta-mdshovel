@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* vim: set ft=javascript: */
 /*
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -9,8 +10,417 @@
  * Copyright (c) 2017, Joyent, Inc.
  */
 
-/* vim: set ft=javascript: */
-
 /*
  * mdstress: stress-test for Manta metadata
  */
+
+var mod_assertplus = require('assert-plus');
+var mod_bunyan = require('bunyan');
+var mod_cmdutil = require('cmdutil');
+var mod_fs = require('fs');
+var mod_getopt = require('posix-getopt');
+var mod_jsprim = require('jsprim');
+var mod_libmanta = require('libmanta');
+var mod_path = require('path');
+var mod_uuid = require('node-uuid');
+var mod_vasync = require('vasync');
+var VError = require('verror');
+
+var mdsUsageMessage = [
+    'Generates metadata according to specified configuration.'
+].join('');
+
+/*
+ * This stress tester generates metadata similar to known workloads as follows:
+ * for each operation (simulating an application-level operation), we generate a
+ * uuid, then we create a directory for the operation under "largeDirectory",
+ * and we create a tree of directories under "smallDirectoryRoot".  We complete
+ * operations with concurrency "concurrency".
+ */
+var mdsConfigSchema = {
+    'type': 'object',
+    'properties': {
+	'metadataService': {
+	    'type': 'object',
+	    'required': true,
+	    'properties': {
+		'srvDomain': {
+		    'type': 'string',
+		    'required': true
+		},
+		'cueballOptions': {
+		    'type': 'object',
+		    'required': true
+		}
+	    }
+	},
+	'concurrency': {
+	    'type': 'number',
+	    'required': true,
+	    'minimum': 1,
+	    'maximum': 128
+	},
+	'largeDirectory': {
+	    'type': 'string',
+	    'required': true
+	},
+	'smallDirectoryRoot': {
+	    'type': 'string',
+	    'required': true
+	}
+    }
+};
+
+function main()
+{
+	var parser, option, argv;
+	var log, cfgfile, dryrun;
+
+	log = new mod_bunyan({
+	    'name': 'mdstress',
+	    'level': process.env['LOG_LEVEL'] || 'fatal'
+	});
+
+	mod_cmdutil.configure({
+	    'synopses': [ 'CONFIG_FILE' ],
+	    'usageMessage': mdsUsageMessage
+	});
+
+	dryrun = false;
+	parser = new mod_getopt.BasicParser('n', process.argv);
+	while ((option = parser.getopt()) !== undefined) {
+		switch (option.option) {
+		case 'n':
+			dryrun = true;
+			break;
+
+		default:
+			/* error message already emitted by getopt */
+			mod_assertplus.equal('?', option.option);
+			mod_cmdutil.usage();
+			break;
+		}
+	}
+
+	argv = process.argv.slice(parser.optind());
+	if (argv.length != 1) {
+		mod_cmdutil.usage('expected exactly one argument');
+	}
+
+	cfgfile = argv[0];
+	mdsConfigLoadFromFile({
+	    'log': log,
+	    'dryRun': dryrun,
+	    'filename': cfgfile
+	}, function (err, mds) {
+		if (err) {
+			mod_cmdutil.fail(err);
+		}
+
+		mdsStress(mds);
+	});
+}
+
+/*
+ * Given a filename in "args.filename", initializes program state based on the
+ * configuration in that file.
+ */
+function mdsConfigLoadFromFile(args, callback)
+{
+	var log, filename, dryrun;
+
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.string(args.filename, 'args.filename');
+	mod_assertplus.object(args.log, 'args.log');
+	mod_assertplus.bool(args.dryRun, 'args.dryRun');
+
+	filename = args.filename;
+	log = args.log;
+	dryrun = args.dryRun;
+	mod_fs.readFile(filename, function (err, filebytes) {
+		var json, error, suffix;
+
+		if (err) {
+			callback(new VError(err, 'read "%s"', filename));
+			return;
+		}
+
+		try {
+			json = JSON.parse(filebytes.toString('utf8'));
+		} catch (ex) {
+			callback(new VError(ex, 'parse "%s"', filename));
+			return;
+		}
+
+		error = mod_jsprim.validateJsonObject(mdsConfigSchema, json);
+		if (error instanceof Error) {
+			callback(new VError(error, 'validate "%s"', filename));
+			return;
+		}
+
+		suffix = mod_path.basename(json.largeDirectory);
+		if (suffix.length != 1) {
+			callback(new VError('"largeDirectory" should refer ' +
+			    'to a directory whose basename is 1 character'));
+			return;
+		}
+
+		callback(null, new Mds({
+		    'filename': filename,
+		    'dryRun': dryrun,
+		    'log': log,
+		    'configRaw': json
+		}));
+	});
+}
+
+/*
+ * Stores the configuration and runtime state for the `mdstress` operation.
+ * By the time we call the constructor, the JSON must already have been
+ * validated.
+ */
+function Mds(args)
+{
+	mod_assertplus.object(args, 'args');
+	mod_assertplus.string(args.filename, 'args.filename');
+	mod_assertplus.object(args.log, 'args.log');
+	mod_assertplus.object(args.configRaw, 'args.configRaw');
+	mod_assertplus.bool(args.dryRun, 'args.dryRun');
+
+	/* static configuration */
+	this.mds_config_filename = args.filename;
+	this.mds_config_raw = args.configRaw;
+	this.mds_max_concurrency = args.configRaw.concurrency;
+	this.mds_path_large = args.configRaw.largeDirectory;
+	this.mds_path_small = args.configRaw.smallDirectoryRoot;
+	this.mds_uuid_pfx = mod_path.basename(
+	    this.mds_config_raw.largeDirectory);
+	this.mds_dryrun = args.dryRun;
+
+	/* runtime state */
+
+	/* bunyan logger */
+	this.mds_log = args.log;
+	/* metadata tier client (from libmanta) */
+	this.mds_mdclient = null;
+	/* timestamp when the metadata client became ready */
+	this.mds_mdclient_ready = null;
+	/* pending operations */
+	this.mds_pending = {};
+
+	/* counters */
+	this.mds_nops_started = 0;	/* operations started */
+	this.mds_nops_done = 0;		/* operations completed */
+	this.mds_nops_fail = 0;		/* operations failed */
+}
+
+/*
+ * Kicks off the `mdstress` workload.
+ */
+function mdsStress(mds)
+{
+	mod_assertplus.strictEqual(mds.mds_mdclient, null);
+
+	mds.mds_log.info({
+	    'configFilename': mds.mds_config_filename,
+	    'configRaw': mds.mds_config_raw,
+	    'dryRun': mds.mds_dryrun
+	}, 'init');
+
+	mds.mds_mdclient = mod_libmanta.createMorayClient({
+	    'log': mds.mds_log.child({ 'component': 'libmanta.Moray' }),
+	    'morayOptions': mds.mds_config_raw.metadataService
+	});
+
+	mds.mds_mdclient.on('error', function onMetadataClientError(err) {
+		mod_cmdutil.fail(new VError(
+		    err, 'fatal error from metadata client'));
+	});
+
+	mds.mds_mdclient.on('connect', function onMetadataClientConnect() {
+		var i, max;
+
+		mds.mds_mdclient_ready = new Date();
+		mds.mds_log.info('connected to the metadata tier');
+
+		mod_assertplus.notStrictEqual(mds.mds_mdclient, null);
+		max = mds.mds_max_concurrency;
+		mod_assertplus.number(max);
+		mod_assertplus.ok(max > 0);
+		for (i = 0; i < mds.mds_max_concurrency; i++) {
+			mdsStressOperation(mds);
+		}
+	});
+}
+
+/*
+ * Completes one application-level operation, as described above.
+ */
+function mdsStressOperation(mds)
+{
+	var uuid, op;
+
+	/*
+	 * The workload that we're simulating uses general uuids, but shards
+	 * them over 16 metadata directories based on the first character of the
+	 * uuid.  To reproduce the problem faster, we want to concentrate all of
+	 * our work on one of these directories, as though all uuids started
+	 * with the same letter.  Since we're faking up metadata anyway, it
+	 * doesn't matter if our uuid really starts with that letter, but it
+	 * will be a little less confusing this way.
+	 */
+	uuid = mds.mds_uuid_pfx + mod_uuid.v4().substr(mds.mds_uuid_pfx.length);
+	mod_assertplus.uuid(uuid);
+
+	op = {
+	    'mp_uuid': uuid,
+	    'mp_pipeline': null,
+	    'mp_start_walltime': new Date(),
+	    'mp_start_hrtime': process.hrtime(),
+	    'mp_elapsed': null
+	};
+
+	mds.mds_pending[uuid] = op;
+	mds.mds_nops_started++;
+	mds.mds_log.debug({
+	    'uuid': uuid,
+	    'nstarted': mds.mds_nops_started,
+	    'ndone': mds.mds_nops_done,
+	    'nfailures': mds.mds_nops_fail
+	}, 'beginning operation');
+
+	op.mp_pipeline = mod_vasync.waterfall([
+	    function mdsOpCreateLargeEntry(callback) {
+		var path = mod_path.join(mds.mds_path_large, uuid);
+		mdsCreateDirectory(mds, uuid, path, callback);
+	    },
+
+	    function mdsOpCreateSmallEntryOne(callback) {
+		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2));
+		mdsCreateDirectory(mds, uuid, path, callback);
+	    },
+
+	    function mdsOpCreateSmallEntryTwo(callback) {
+		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
+		    uuid.substr(0, 16));
+		mdsCreateDirectory(mds, uuid, path, callback);
+	    },
+
+	    function mdsOpCreateSmallEntryLeaf(callback) {
+		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
+		    uuid.substr(0, 16), uuid);
+		mdsCreateObject(mds, uuid, path, callback);
+	    }
+	], function (err) {
+		mod_assertplus.ok(mds.mds_nops_started >= mds.mds_nops_done);
+		mod_assertplus.ok(mds.mds_nops_started - mds.mds_nops_done
+		    <= mds.mds_max_concurrency);
+		mod_assertplus.ok(mds.mds_pending[uuid] == op);
+
+		op.mp_elapsed = process.hrtime(op.mp_start_hrtime);
+		mds.mds_nops_done++;
+		delete (mds.mds_pending[uuid]);
+		mds.mds_log.debug({
+		    'failed': err ? true : false,
+		    'latency': mod_jsprim.hrtimeMillisec(op.mp_elapsed),
+		    'uuid': uuid,
+		    'nstarted': mds.mds_nops_started,
+		    'ndone': mds.mds_nops_done,
+		    'nfailures': mds.mds_nops_fail
+		}, 'operation complete');
+
+		if (err) {
+			mds.mds_nops_fail++;
+			err = new VError(err, 'operation failed');
+			mds.mds_log.warn(err);
+		}
+
+		mdsStressOperation(mds);
+	});
+}
+
+/*
+ * Creates metadata for a directory at "path".  In dry-run mode, this does
+ * nothing.
+ */
+function mdsCreateDirectory(mds, reqid, path, callback)
+{
+	mdsCreateEntry(mds, 'mkdir', {
+	    'dirname': mod_path.dirname(path),
+	    'key': path,
+	    'headers': {},
+	    'mtime': Date.now(),
+	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
+	    'requestId': reqid,
+	    'roles': [],
+	    'type': 'directory',
+	    '_etag': null
+	}, function (err) {
+		if (err && VError.hasCauseWithName(err, 'EtagConflictError')) {
+			err = null;
+		}
+
+		callback(err);
+	});
+}
+
+/*
+ * Creates metadata for an object at "path".  In dry-run mode, this does
+ * nothing.
+ */
+function mdsCreateObject(mds, reqid, path, callback)
+{
+	mdsCreateEntry(mds, 'put', {
+	    'dirname': mod_path.dirname(path),
+	    'key': path,
+	    'headers': {},
+	    'mtime': Date.now(),
+	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
+	    'requestId': reqid,
+	    'roles': [],
+	    'type': 'directory',
+	    '_etag': null,
+	    'contentLength': 0,
+	    'contentMD5': 'invalid-md5-sum',
+	    'contentType': 'application/octet-stream',
+	    'objectId': reqid,
+	    'sharks': [ {
+	        'datacenter': 'invalid_dc',
+		'manta_storage_id': 'invalid_shark'
+	    } ]
+	}, callback);
+}
+
+/*
+ * Lowest-level function for creating a Manta metadata entry.  The caller
+ * provides "metadata", the actual metadata, which should be valid metadata for
+ * a directory or object.  "opname" should be "mkdir" or "put" -- it's used for
+ * log messages and error messages.
+ */
+function mdsCreateEntry(mds, opname, metadata, callback)
+{
+	if (mds.mds_dryrun) {
+		mds.mds_log.debug({
+		    'op': opname,
+		    'path': metadata.key,
+		    'reqid': metadata.requestId
+		}, 'skipping operation (dry run)');
+
+		/*
+		 * We throttle the dry run, since one of the main purposes is to
+		 * validate the concurrency of the program.
+		 */
+		setTimeout(callback, 100);
+		return;
+	}
+
+	mds.mds_mdclient.putMetadata(metadata, function (err) {
+		if (err) {
+			err = new VError(err, '%s "%s"', opname, metadata.key);
+		}
+
+		callback(err);
+	});
+}
+
+main();
