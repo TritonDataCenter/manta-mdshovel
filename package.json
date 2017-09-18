@@ -1,0 +1,21 @@
+{
+	"name": "manta-mdstress",
+	"description": "metadata stress-tester for Manta",
+	"version": "1.0.0",
+	"repository": {
+		"type": "git",
+		"url": "git://github.com/joyent/manta-mdstress.git"
+	},
+	"dependencies": {
+		"artedi": "^1.0.0",
+		"bunyan": "^1.8.12",
+		"cmdutil": "^1.1.0",
+		"kang": "^1.2.0",
+		"libmanta": "git+https://github.com/joyent/node-libmanta#master",
+		"manta": "^5.1.0",
+		"posix-getopt": "^1.2.0",
+		"vasync": "^2.1.0",
+		"verror": "^1.10.0"
+	},
+	"license": "MIT"
+}
