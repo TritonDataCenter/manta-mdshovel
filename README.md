@@ -42,6 +42,7 @@ Then make a configuration file that looks like this:
         "concurrency": 1,
         "largeDirectory": "/dap/bigdir/a",
         "smallDirectoryRoot": "/dap/smalldir"
+        "artediPort": 1809
     }
 
 where:
@@ -58,6 +59,8 @@ where:
   application-level operation
 * `smallDirectoryRoot` points to a path where a small multi-level directory tree
   will be created for each application-level operation
+* `artediPort` is a TCP port number on which a Prometheus endpoint will be
+  exposed (on all network interfaces) for metrics
 
 While the database is small, you can monitor the behavior using PostgreSQL
 queries like:
@@ -86,3 +89,54 @@ queries like:
      /dap/smalldir/a4/a421e29a-2daf-4a |       1
      /dap/smalldir/a4/a41821b1-504d-4b |       1
     (20 rows)
+
+You can also monitor the program by hitting the artedi port with curl(1) (or, of
+course, Prometheus):
+
+    $ curl -i  localhost:1809/metrics
+    HTTP/1.1 200 OK
+    Content-Type: text/plain; version=0.0.4
+    Date: Tue, 19 Sep 2017 00:23:43 GMT
+    Connection: keep-alive
+    Transfer-Encoding: chunked
+
+    # HELP nstarted count of composite operations started
+    # TYPE nstarted counter
+    nstarted{} 2179 1505780623275
+    # HELP ndone count of composite operations completed (including failures)
+    # TYPE ndone counter
+    ndone{} 2178 1505780623274
+    # HELP nfail count of composite operations that have failed
+    # TYPE nfail counter
+    # HELP composite_latency_ms latency of composite operations
+    # TYPE composite_latency_ms histogram
+    composite_latency_ms{le="81"} 1946 1505780623274
+    composite_latency_ms{le="243"} 2178 1505780623274
+    composite_latency_ms{le="405"} 2178 1505780623274
+    composite_latency_ms{le="567"} 2178 1505780623274
+    composite_latency_ms{le="729"} 2178 1505780623274
+    composite_latency_ms{le="+Inf"} 2178 1505780623274
+    composite_latency_ms{le="9"} 0 0
+    composite_latency_ms{le="27"} 0 0
+    composite_latency_ms{le="45"} 705 1505780623274
+    composite_latency_ms{le="63"} 1753 1505780623274
+    composite_latency_ms_count{} 2178 1505780623274
+    composite_latency_ms_sum{} 120322 1505780623274
+    # HELP putmd_latency_ms latency of putmetadata operations
+    # TYPE putmd_latency_ms histogram
+    putmd_latency_ms{le="9"} 2361 1505780623247
+    putmd_latency_ms{le="27"} 8271 1505780623299
+    putmd_latency_ms{le="45"} 8663 1505780623300
+    putmd_latency_ms{le="63"} 8707 1505780623300
+    putmd_latency_ms{le="81"} 8712 1505780623300
+    putmd_latency_ms{le="+Inf"} 8714 1505780623300
+    putmd_latency_ms{le="1"} 0 0
+    putmd_latency_ms{le="3"} 0 0
+    putmd_latency_ms{le="5"} 1587 1505780623247
+    putmd_latency_ms{le="7"} 2106 1505780623247
+    putmd_latency_ms{le="243"} 8714 1505780623300
+    putmd_latency_ms{le="405"} 8714 1505780623300
+    putmd_latency_ms{le="567"} 8714 1505780623300
+    putmd_latency_ms{le="729"} 8714 1505780623300
+    putmd_latency_ms_count{} 8714 1505780623300
+    putmd_latency_ms_sum{} 111929 1505780623300

@@ -14,6 +14,7 @@
  * mdstress: stress-test for Manta metadata
  */
 
+var mod_artedi = require('artedi');
 var mod_assertplus = require('assert-plus');
 var mod_bunyan = require('bunyan');
 var mod_cmdutil = require('cmdutil');
@@ -21,6 +22,7 @@ var mod_fs = require('fs');
 var mod_getopt = require('posix-getopt');
 var mod_jsprim = require('jsprim');
 var mod_libmanta = require('libmanta');
+var mod_http = require('http');
 var mod_path = require('path');
 var mod_uuid = require('node-uuid');
 var mod_vasync = require('vasync');
@@ -67,6 +69,12 @@ var mdsConfigSchema = {
 	'smallDirectoryRoot': {
 	    'type': 'string',
 	    'required': true
+	},
+	'artediPort': {
+	    'type': 'number',
+	    'required': true,
+	    'minimum': 1,
+	    'maximum': 65535
 	}
     }
 };
@@ -191,6 +199,7 @@ function Mds(args)
 	this.mds_config_filename = args.filename;
 	this.mds_config_raw = args.configRaw;
 	this.mds_max_concurrency = args.configRaw.concurrency;
+	this.mds_port = args.configRaw.artediPort;
 	this.mds_path_large = args.configRaw.largeDirectory;
 	this.mds_path_small = args.configRaw.smallDirectoryRoot;
 	this.mds_uuid_pfx = mod_path.basename(
@@ -201,6 +210,10 @@ function Mds(args)
 
 	/* bunyan logger */
 	this.mds_log = args.log;
+	/* artedi collector */
+	this.mds_artedi = mod_artedi.createCollector();
+	/* http server for artedi */
+	this.mds_server = null;
 	/* metadata tier client (from libmanta) */
 	this.mds_mdclient = null;
 	/* timestamp when the metadata client became ready */
@@ -208,7 +221,33 @@ function Mds(args)
 	/* pending operations */
 	this.mds_pending = {};
 
-	/* counters */
+	/*
+	 * Artedi-based metrics
+	 */
+	this.mds_c_nstarted = this.mds_artedi.counter({
+	    'name': 'nstarted',
+	    'help': 'count of composite operations started'
+	});
+	this.mds_c_ndone = this.mds_artedi.counter({
+	    'name': 'ndone',
+	    'help': 'count of composite operations completed ' +
+		'(including failures)'
+	});
+	this.mds_c_nfail = this.mds_artedi.counter({
+	    'name': 'nfail',
+	    'help': 'count of composite operations that have failed'
+	});
+
+	this.mds_hist_op = this.mds_artedi.histogram({
+	    'name': 'composite_latency_ms',
+	    'help': 'latency of composite operations'
+	});
+	this.mds_hist_putmd = this.mds_artedi.histogram({
+	    'name': 'putmd_latency_ms',
+	    'help': 'latency of putmetadata operations'
+	});
+
+	/* simple counters */
 	this.mds_nops_started = 0;	/* operations started */
 	this.mds_nops_done = 0;		/* operations completed */
 	this.mds_nops_fail = 0;		/* operations failed */
@@ -243,13 +282,19 @@ function mdsStress(mds)
 		mds.mds_mdclient_ready = new Date();
 		mds.mds_log.info('connected to the metadata tier');
 
-		mod_assertplus.notStrictEqual(mds.mds_mdclient, null);
-		max = mds.mds_max_concurrency;
-		mod_assertplus.number(max);
-		mod_assertplus.ok(max > 0);
-		for (i = 0; i < mds.mds_max_concurrency; i++) {
-			mdsStressOperation(mds);
-		}
+		mdsArtediStart(mds, function (err) {
+			if (err) {
+				mod_cmdutil.fail(err);
+			}
+
+			mod_assertplus.notStrictEqual(mds.mds_mdclient, null);
+			max = mds.mds_max_concurrency;
+			mod_assertplus.number(max);
+			mod_assertplus.ok(max > 0);
+			for (i = 0; i < mds.mds_max_concurrency; i++) {
+				mdsStressOperation(mds);
+			}
+		});
 	});
 }
 
@@ -282,6 +327,7 @@ function mdsStressOperation(mds)
 
 	mds.mds_pending[uuid] = op;
 	mds.mds_nops_started++;
+	mds.mds_c_nstarted.increment();
 	mds.mds_log.debug({
 	    'uuid': uuid,
 	    'nstarted': mds.mds_nops_started,
@@ -312,6 +358,8 @@ function mdsStressOperation(mds)
 		mdsCreateObject(mds, uuid, path, callback);
 	    }
 	], function (err) {
+		var latms;
+
 		mod_assertplus.ok(mds.mds_nops_started >= mds.mds_nops_done);
 		mod_assertplus.ok(mds.mds_nops_started - mds.mds_nops_done
 		    <= mds.mds_max_concurrency);
@@ -319,10 +367,14 @@ function mdsStressOperation(mds)
 
 		op.mp_elapsed = process.hrtime(op.mp_start_hrtime);
 		mds.mds_nops_done++;
+		mds.mds_c_ndone.increment();
 		delete (mds.mds_pending[uuid]);
+
+		latms = mod_jsprim.hrtimeMillisec(op.mp_elapsed);
+		mds.mds_hist_op.observe(latms);
 		mds.mds_log.debug({
 		    'failed': err ? true : false,
-		    'latency': mod_jsprim.hrtimeMillisec(op.mp_elapsed),
+		    'latency': latms,
 		    'uuid': uuid,
 		    'nstarted': mds.mds_nops_started,
 		    'ndone': mds.mds_nops_done,
@@ -331,6 +383,7 @@ function mdsStressOperation(mds)
 
 		if (err) {
 			mds.mds_nops_fail++;
+			mds.mds_c_nfail.increment();
 			err = new VError(err, 'operation failed');
 			mds.mds_log.warn(err);
 		}
@@ -385,7 +438,7 @@ function mdsCreateObject(mds, reqid, path, callback)
 	    'contentType': 'application/octet-stream',
 	    'objectId': reqid,
 	    'sharks': [ {
-	        'datacenter': 'invalid_dc',
+		'datacenter': 'invalid_dc',
 		'manta_storage_id': 'invalid_shark'
 	    } ]
 	}, callback);
@@ -414,12 +467,66 @@ function mdsCreateEntry(mds, opname, metadata, callback)
 		return;
 	}
 
+	var start = process.hrtime();
 	mds.mds_mdclient.putMetadata(metadata, function (err) {
+		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
+		mds.mds_hist_putmd.observe(latms);
+
 		if (err) {
 			err = new VError(err, '%s "%s"', opname, metadata.key);
 		}
 
 		callback(err);
+	});
+}
+
+/*
+ * Starts an HTTP server for Artedi-based metrics.
+ */
+function mdsArtediStart(mds, callback)
+{
+	mds.mds_server = mod_http.createServer(function (request, response) {
+		mdsArtediHandleRequest(mds, request, response);
+	});
+
+	mds.mds_server.listen(mds.mds_port, function () {
+		mds.mds_log.info(
+		    { 'address': mds.mds_server.address() },
+		    'listening (artedi server)');
+		callback();
+	});
+}
+
+function mdsArtediHandleRequest(mds, request, response)
+{
+	if (request.url != '/metrics') {
+		response.writeHead(404, { 'connection': 'close' });
+		response.end();
+		return;
+	}
+
+	if (request.method != 'GET') {
+		response.writeHead(405, { 'connection': 'close' });
+		response.end();
+		return;
+	}
+
+	mds.mds_artedi.collect(mod_artedi.FMT_PROM, function (err, metrics) {
+		if (err) {
+			response.writeHead(500, { 'connection': 'close' });
+			mds.mds_log.warn(err, 'failed to collect metrics');
+			response.end();
+			return;
+		}
+
+		request.on('end', function () {
+			response.writeHead(200, {
+			    'Content-Type': 'text/plain; version=0.0.4'
+			});
+			response.end(metrics);
+		});
+
+		request.resume();
 	});
 }
 
