@@ -17,7 +17,7 @@ NPM		 = npm
 # Files
 #
 JSON_FILES	 = package.json
-JS_FILES	:= bin/mdstress $(shell find lib -name '*.js')
+JS_FILES	:= bin/mdshovel
 JSL_FILES_NODE	 = $(JS_FILES)
 JSSTYLE_FILES	 = $(JS_FILES)
 JSL_CONF_NODE	 = tools/jsl.node.conf

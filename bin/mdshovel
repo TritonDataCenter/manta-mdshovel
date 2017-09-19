@@ -11,7 +11,7 @@
  */
 
 /*
- * mdstress: stress-test for Manta metadata
+ * mdshovel: stress-test for Manta metadata
  */
 
 var mod_artedi = require('artedi');
@@ -85,7 +85,7 @@ function main()
 	var log, cfgfile, dryrun;
 
 	log = new mod_bunyan({
-	    'name': 'mdstress',
+	    'name': 'mdshovel',
 	    'level': process.env['LOG_LEVEL'] || 'fatal'
 	});
 
@@ -125,7 +125,7 @@ function main()
 			mod_cmdutil.fail(err);
 		}
 
-		mdsStress(mds);
+		mdsShovel(mds);
 	});
 }
 
@@ -183,7 +183,7 @@ function mdsConfigLoadFromFile(args, callback)
 }
 
 /*
- * Stores the configuration and runtime state for the `mdstress` operation.
+ * Stores the configuration and runtime state for the `mdshovel` operation.
  * By the time we call the constructor, the JSON must already have been
  * validated.
  */
@@ -254,9 +254,9 @@ function Mds(args)
 }
 
 /*
- * Kicks off the `mdstress` workload.
+ * Kicks off the `mdshovel` workload.
  */
-function mdsStress(mds)
+function mdsShovel(mds)
 {
 	mod_assertplus.strictEqual(mds.mds_mdclient, null);
 
@@ -292,7 +292,7 @@ function mdsStress(mds)
 			mod_assertplus.number(max);
 			mod_assertplus.ok(max > 0);
 			for (i = 0; i < mds.mds_max_concurrency; i++) {
-				mdsStressOperation(mds);
+				mdsShovelOperation(mds);
 			}
 		});
 	});
@@ -301,7 +301,7 @@ function mdsStress(mds)
 /*
  * Completes one application-level operation, as described above.
  */
-function mdsStressOperation(mds)
+function mdsShovelOperation(mds)
 {
 	var uuid, op;
 
@@ -388,7 +388,7 @@ function mdsStressOperation(mds)
 			mds.mds_log.warn(err);
 		}
 
-		mdsStressOperation(mds);
+		mdsShovelOperation(mds);
 	});
 }
 

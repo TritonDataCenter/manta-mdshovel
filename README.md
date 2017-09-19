@@ -8,9 +8,9 @@
     Copyright (c) 2017, Joyent, Inc.
 -->
 
-# manta-mdstress: metadata stress-tester for Manta
+# manta-mdshovel: metadata stress-tester for Manta
 
-`mdstress` is a development tool that connects directly to the Manta metadata
+`mdshovel` is a development tool that connects directly to the Manta metadata
 tier and generates certain pathological metadata workloads.  The primary goal
 is to reproduce the pathological database performance observed under
 [MANTA-3428](https://smartos.org/bugview/MANTA-3428), which involves a fairly

@@ -1,10 +1,10 @@
 {
-	"name": "manta-mdstress",
+	"name": "manta-mdshovel",
 	"description": "metadata stress-tester for Manta",
 	"version": "1.0.0",
 	"repository": {
 		"type": "git",
-		"url": "git://github.com/joyent/manta-mdstress.git"
+		"url": "git://github.com/joyent/manta-mdshovel.git"
 	},
 	"dependencies": {
 		"artedi": "^1.0.0",
