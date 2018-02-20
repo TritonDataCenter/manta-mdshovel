@@ -56,6 +56,10 @@ var mdsConfigSchema = {
 		}
 	    }
 	},
+	'storageHost': {
+	    'type': 'string',
+	    'required': true
+	},
 	'concurrency': {
 	    'type': 'number',
 	    'required': true,
@@ -204,6 +208,7 @@ function Mds(args)
 	this.mds_path_small = args.configRaw.smallDirectoryRoot;
 	this.mds_uuid_pfx = mod_path.basename(
 	    this.mds_config_raw.largeDirectory);
+	this.mds_storage_host = args.configRaw.storageHost;
 	this.mds_dryrun = args.dryRun;
 
 	/* runtime state */
@@ -220,6 +225,12 @@ function Mds(args)
 	this.mds_mdclient_ready = null;
 	/* pending operations */
 	this.mds_pending = {};
+
+	/* http keep-alive agent */	
+	var mds_http_agent = new mod_http.Agent({
+		'keepAlive': true,
+		'maxSockets': 10
+	});
 
 	/*
 	 * Artedi-based metrics
@@ -245,6 +256,10 @@ function Mds(args)
 	this.mds_hist_putmd = this.mds_artedi.histogram({
 	    'name': 'putmd_latency_ms',
 	    'help': 'latency of putmetadata operations'
+	});
+	this.mds_c_putobj = this.mds_artedi.counter({
+	    'name': 'nobjs',
+	    'help': 'count of objects uploaded to sharks'
 	});
 
 	/* simple counters */
@@ -296,6 +311,23 @@ function mdsShovel(mds)
 			}
 		});
 	});
+
+	/* print metrics before we exit */
+	function print_metrics() {
+		mds.mds_artedi.collect(mod_artedi.FMT_PROM,
+		    function (err, metrics) {
+
+			if (err) {
+				mds.mds_log.warn(err,
+				    'failed to collect metrics');
+				process.exit(1);
+			}
+			mds.mds_log.info(metrics);
+			process.exit(0);
+		});
+	}
+	process.on('SIGTERM', print_metrics);
+	process.on('SIGINT', print_metrics);
 }
 
 /*
@@ -335,7 +367,8 @@ function mdsShovelOperation(mds)
 	    'nfailures': mds.mds_nops_fail
 	}, 'beginning operation');
 
-	op.mp_pipeline = mod_vasync.waterfall([
+	op.mp_pipeline = mod_vasync.parallel({ 'funcs': [
+	    /*
 	    function mdsOpCreateLargeEntry(callback) {
 		var path = mod_path.join(mds.mds_path_large, uuid);
 		mdsCreateDirectory(mds, uuid, path, callback);
@@ -351,13 +384,17 @@ function mdsShovelOperation(mds)
 		    uuid.substr(0, 16));
 		mdsCreateDirectory(mds, uuid, path, callback);
 	    },
+	    */
 
 	    function mdsOpCreateSmallEntryLeaf(callback) {
+		/*
 		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
 		    uuid.substr(0, 16), uuid);
+		*/
+		var path = mod_path.join(mds.mds_path_large, uuid);
 		mdsCreateObject(mds, uuid, path, callback);
 	    }
-	], function (err) {
+	]}, function (err) {
 		var latms;
 
 		mod_assertplus.ok(mds.mds_nops_started >= mds.mds_nops_done);
@@ -423,25 +460,93 @@ function mdsCreateDirectory(mds, reqid, path, callback)
  */
 function mdsCreateObject(mds, reqid, path, callback)
 {
-	mdsCreateEntry(mds, 'put', {
-	    'dirname': mod_path.dirname(path),
-	    'key': path,
-	    'headers': {},
-	    'mtime': Date.now(),
-	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
-	    'requestId': reqid,
-	    'roles': [],
-	    'type': 'directory',
-	    '_etag': null,
-	    'contentLength': 0,
-	    'contentMD5': 'invalid-md5-sum',
-	    'contentType': 'application/octet-stream',
-	    'objectId': reqid,
-	    'sharks': [ {
-		'datacenter': 'invalid_dc',
-		'manta_storage_id': 'invalid_shark'
-	    } ]
-	}, callback);
+	var body = '';
+	/* attempt to limit the number of connections created to sharks */
+	var owner = 'e9c7b8f7-f51a-43ed-a159-f109da7d3162';
+	var opts = {
+		'hostname': mds.mds_storage_host,
+		'port': 80,
+		'method': 'PUT',
+		'headers': {
+			'Content-Type': 'text/plain',
+			'Content-Length': body.length,
+			'Connection': 'keep-alive'
+		},
+		'agent': mds.mds_agent
+	};
+
+	mod_vasync.pipeline({
+		'funcs': [
+			function (_, cb) {
+				mdsCreateEntry(mds, 'put', {
+				    'dirname': mod_path.dirname(path),
+				    'key': path,
+				    'headers': {},
+				    'mtime': Date.now(),
+				    'owner': owner,
+				    'requestId': reqid,
+				    'roles': [],
+				    'type': 'directory',
+				    '_etag': null,
+				    'contentLength': 0,
+				    'contentMD5': 'invalid-md5-sum',
+				    'contentType': 'application/octet-stream',
+				    'objectId': reqid,
+				    'sharks': [ {
+					'datacenter': 'invalid_dc',
+					'manta_storage_id': 'invalid_shark'
+				    } ]
+				}, cb);
+			},
+			/* upload the same object twice (to the same mako) */
+			function (_, cb) {
+				var uuid = mod_uuid.v4();
+				var path = '/' + owner + '/' + uuid;
+				opts['path'] = path;
+				var req =
+				    mod_http.request(opts, function (res) {
+					mds.mds_log.info('file upload status:',
+					    res.statusCode);
+					cb();
+					return;
+				});
+				req.on('error', function (e) {
+					mds.mds_log.error(e,
+					    'problem uploading file');
+					mds.mds_c_putobj.increment();
+					cb();
+					return;
+				});
+
+				req.write(body);
+				req.end();
+			},
+			function (_, cb) {
+				var uuid = mod_uuid.v4();
+				var path = '/' + owner + '/' + uuid;
+				opts['path'] = path;
+				var req =
+				    mod_http.request(opts, function (res) {
+					mds.mds_log.info('file upload status:',
+					    res.statusCode);
+					mds.mds_c_putobj.increment();
+					cb();
+					return;
+				});
+				req.on('error', function (e) {
+					mds.mds_log.error(e,
+					    'problem uploading file');
+					cb();
+					return;
+				});
+
+				req.write(body);
+				req.end();
+			}
+		]
+	}, function (err) {
+		callback(err);
+	});
 }
 
 /*
