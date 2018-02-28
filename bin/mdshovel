@@ -166,13 +166,6 @@ function mdsConfigLoadFromFile(args, callback)
 			return;
 		}
 
-		suffix = mod_path.basename(json.largeDirectory);
-		if (suffix.length != 1) {
-			callback(new VError('"largeDirectory" should refer ' +
-			    'to a directory whose basename is 1 character'));
-			return;
-		}
-
 		callback(null, new Mds({
 		    'filename': filename,
 		    'dryRun': dryrun,
@@ -303,7 +296,7 @@ function mdsShovel(mds)
  */
 function mdsShovelOperation(mds)
 {
-	var uuid, op;
+	var uuid, op, m_path;
 
 	/*
 	 * The workload that we're simulating uses general uuids, but shards
@@ -314,7 +307,7 @@ function mdsShovelOperation(mds)
 	 * doesn't matter if our uuid really starts with that letter, but it
 	 * will be a little less confusing this way.
 	 */
-	uuid = mds.mds_uuid_pfx + mod_uuid.v4().substr(mds.mds_uuid_pfx.length);
+	uuid = mod_uuid.v4();
 	mod_assertplus.uuid(uuid);
 
 	op = {
@@ -337,24 +330,13 @@ function mdsShovelOperation(mds)
 
 	op.mp_pipeline = mod_vasync.waterfall([
 	    function mdsOpCreateLargeEntry(callback) {
-		var path = mod_path.join(mds.mds_path_large, uuid);
-		mdsCreateDirectory(mds, uuid, path, callback);
+		m_path = mod_path.join(mds.mds_path_large + uuid, uuid);
+		mdsCreateDirectory(mds, uuid, m_path, callback);
 	    },
 
-	    function mdsOpCreateSmallEntryOne(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2));
-		mdsCreateDirectory(mds, uuid, path, callback);
-	    },
-
-	    function mdsOpCreateSmallEntryTwo(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16));
-		mdsCreateDirectory(mds, uuid, path, callback);
-	    },
-
-	    function mdsOpCreateSmallEntryLeaf(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16), uuid);
+	    function mdsOpCreateLargeEntryLeaf(callback) {
+		var m_uuid = mod_uuid.v4();
+		var path = mod_path.join(m_path, m_uuid);
 		mdsCreateObject(mds, uuid, path, callback);
 	    }
 	], function (err) {
@@ -431,7 +413,7 @@ function mdsCreateObject(mds, reqid, path, callback)
 	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
 	    'requestId': reqid,
 	    'roles': [],
-	    'type': 'directory',
+	    'type': 'object',
 	    '_etag': null,
 	    'contentLength': 0,
 	    'contentMD5': 'invalid-md5-sum',
