@@ -166,13 +166,6 @@ function mdsConfigLoadFromFile(args, callback)
 			return;
 		}
 
-		suffix = mod_path.basename(json.largeDirectory);
-		if (suffix.length != 1) {
-			callback(new VError('"largeDirectory" should refer ' +
-			    'to a directory whose basename is 1 character'));
-			return;
-		}
-
 		callback(null, new Mds({
 		    'filename': filename,
 		    'dryRun': dryrun,
@@ -237,14 +230,18 @@ function Mds(args)
 	    'name': 'nfail',
 	    'help': 'count of composite operations that have failed'
 	});
+	this.mds_c_op_done = this.mds_artedi.counter({
+	    'name': 'nopdone',
+	    'help': 'count of discrete metadata operations finished'
+	});
 
 	this.mds_hist_op = this.mds_artedi.histogram({
 	    'name': 'composite_latency_ms',
 	    'help': 'latency of composite operations'
 	});
-	this.mds_hist_putmd = this.mds_artedi.histogram({
-	    'name': 'putmd_latency_ms',
-	    'help': 'latency of putmetadata operations'
+	this.mds_hist_md = this.mds_artedi.histogram({
+	    'name': 'md_latency_ms',
+	    'help': 'latency of metadata operations'
 	});
 
 	/* simple counters */
@@ -303,22 +300,22 @@ function mdsShovel(mds)
  */
 function mdsShovelOperation(mds)
 {
-	var uuid, op;
+	var op, uuid;
 
-	/*
-	 * The workload that we're simulating uses general uuids, but shards
-	 * them over 16 metadata directories based on the first character of the
-	 * uuid.  To reproduce the problem faster, we want to concentrate all of
-	 * our work on one of these directories, as though all uuids started
-	 * with the same letter.  Since we're faking up metadata anyway, it
-	 * doesn't matter if our uuid really starts with that letter, but it
-	 * will be a little less confusing this way.
-	 */
-	uuid = mds.mds_uuid_pfx + mod_uuid.v4().substr(mds.mds_uuid_pfx.length);
-	mod_assertplus.uuid(uuid);
+	uuid = mod_uuid.v4();
+	/* for object creation */
+	var base_dir = mod_path.join(mds.mds_path_large, mod_uuid.v4(),
+	    mod_uuid.v4());
+	var full_path = mod_path.join(base_dir, mod_uuid.v4());
+
+	/* for dir creation */
+	var dir_path = mod_path.join(mds.mds_path_small, mod_uuid.v4(),
+	    mod_uuid.v4());
 
 	op = {
-	    'mp_uuid': uuid,
+	    'mp_base_dir': base_dir,
+	    'mp_full_path': full_path,
+	    'mp_dir_path': dir_path,
 	    'mp_pipeline': null,
 	    'mp_start_walltime': new Date(),
 	    'mp_start_hrtime': process.hrtime(),
@@ -335,28 +332,40 @@ function mdsShovelOperation(mds)
 	    'nfailures': mds.mds_nops_fail
 	}, 'beginning operation');
 
+	/*
+	 * Workload is:
+	 *
+	 * upload object:
+	 * - getobject (check for existence)
+	 * - getobject (check manta_directory_counts of parent)
+	 * - putobject (actually create the object)
+	 *
+	 * create directory:
+	 * - getobject (see if it exists)
+	 * - putobject (create directory)
+	 *
+	 */
 	op.mp_pipeline = mod_vasync.waterfall([
-	    function mdsOpCreateLargeEntry(callback) {
-		var path = mod_path.join(mds.mds_path_large, uuid);
-		mdsCreateDirectory(mds, uuid, path, callback);
+	    function mdsOpCheckObjExists(callback) {
+		mdsGetObject(mds, uuid, full_path, callback);
 	    },
 
-	    function mdsOpCreateSmallEntryOne(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2));
-		mdsCreateDirectory(mds, uuid, path, callback);
+	    function mdsOpCheckDirents(callback) {
+		mdsGetDirCount(mds, uuid, base_dir, callback);
 	    },
 
-	    function mdsOpCreateSmallEntryTwo(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16));
-		mdsCreateDirectory(mds, uuid, path, callback);
+	    function mdsOpCreateDirent(callback) {
+		mdsCreateObject(mds, uuid, full_path, callback);
 	    },
 
-	    function mdsOpCreateSmallEntryLeaf(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16), uuid);
-		mdsCreateObject(mds, uuid, path, callback);
+	    function mdsOpCheckDirExists(callback) {
+		mdsGetObject(mds, uuid, dir_path, callback);
+	    },
+
+	    function mdsOpCreateDir(callback) {
+		mdsCreateDirectory(mds, uuid, dir_path, callback);
 	    }
+
 	], function (err) {
 		var latms;
 
@@ -393,12 +402,52 @@ function mdsShovelOperation(mds)
 }
 
 /*
+ * Retrieves metadata for the object at "path".  In dry-run mode, this does
+ * nothing.
+ */
+function mdsGetObject(mds, reqid, path, callback)
+{
+	mdsDoOp(mds, 'get', {
+		'key': path,
+		'requestId': reqid
+	}, function (err) {
+		if (err &&
+		    VError.findCauseByName(err, 'ObjectNotFoundError')
+		    !== null) {
+
+			err = null;
+		}
+		callback(err);
+	});
+}
+
+/*
+ * Retrieves the number of entries in the given "path" directory.  In dry-run
+ * mode this does nothing.
+ */
+function mdsGetDirCount(mds, reqid, path, callback)
+{
+	mdsDoOp(mds, 'count', {
+		'directory': path,
+		'requestId': reqid
+	}, function (err) {
+		if (err &&
+		    VError.findCauseByName(err, 'ObjectNotFoundError')
+		    !== null) {
+
+			err = null;
+		}
+		callback(err);
+	});
+}
+
+/*
  * Creates metadata for a directory at "path".  In dry-run mode, this does
  * nothing.
  */
 function mdsCreateDirectory(mds, reqid, path, callback)
 {
-	mdsCreateEntry(mds, 'mkdir', {
+	mdsDoOp(mds, 'mkdir', {
 	    'dirname': mod_path.dirname(path),
 	    'key': path,
 	    'headers': {},
@@ -423,7 +472,7 @@ function mdsCreateDirectory(mds, reqid, path, callback)
  */
 function mdsCreateObject(mds, reqid, path, callback)
 {
-	mdsCreateEntry(mds, 'put', {
+	mdsDoOp(mds, 'put', {
 	    'dirname': mod_path.dirname(path),
 	    'key': path,
 	    'headers': {},
@@ -445,12 +494,13 @@ function mdsCreateObject(mds, reqid, path, callback)
 }
 
 /*
- * Lowest-level function for creating a Manta metadata entry.  The caller
+ * Lowest-level function for interacting with Manta metadata. The caller
  * provides "metadata", the actual metadata, which should be valid metadata for
- * a directory or object.  "opname" should be "mkdir" or "put" -- it's used for
- * log messages and error messages.
+ * a directory or object.  "opname" should be "mkdir", "put", "count", or
+ * "get" -- it's used for logging and determining which node-moray function
+ * to call to fulfill the request.
  */
-function mdsCreateEntry(mds, opname, metadata, callback)
+function mdsDoOp(mds, opname, metadata, callback)
 {
 	if (mds.mds_dryrun) {
 		mds.mds_log.debug({
@@ -467,17 +517,35 @@ function mdsCreateEntry(mds, opname, metadata, callback)
 		return;
 	}
 
-	var start = process.hrtime();
-	mds.mds_mdclient.putMetadata(metadata, function (err) {
+	function done(err) {
 		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
-		mds.mds_hist_putmd.observe(latms);
+		mds.mds_hist_md.observe(latms, {
+		    'operation': opname
+		});
+		mds.mds_c_op_done.increment({
+		    'operation': opname
+		});
 
 		if (err) {
 			err = new VError(err, '%s "%s"', opname, metadata.key);
 		}
 
 		callback(err);
-	});
+	}
+
+	var start = process.hrtime();
+	switch (opname) {
+		case 'count':
+			mds.mds_mdclient.getDirectoryCount(metadata, done);
+			break;
+		case 'get':
+			mds.mds_mdclient.getMetadata(metadata, done);
+			break;
+		default:
+			mds.mds_mdclient.putMetadata(metadata, done);
+			break;
+	}
+
 }
 
 /*
