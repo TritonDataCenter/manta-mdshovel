@@ -60,7 +60,7 @@ var mdsConfigSchema = {
 	    'type': 'number',
 	    'required': true,
 	    'minimum': 1,
-	    'maximum': 128
+	    'maximum': 8192
 	},
 	'largeDirectory': {
 	    'type': 'string',
@@ -302,15 +302,17 @@ function mdsShovelOperation(mds)
 {
 	var op, uuid;
 
+	/*
+	 * The workload that we're simulating uses general uuids, but shards
+	 * them over 16 metadata directories based on the first character of the
+	 * uuid.  To reproduce the problem faster, we want to concentrate all of
+	 * our work on one of these directories, as though all uuids started
+	 * with the same letter.  Since we're faking up metadata anyway, it
+	 * doesn't matter if our uuid really starts with that letter, but it
+	 * will be a little less confusing this way.
+	 */
 	uuid = mod_uuid.v4();
-	/* for object creation */
-	var base_dir = mod_path.join(mds.mds_path_large, mod_uuid.v4(),
-	    mod_uuid.v4());
-	var full_path = mod_path.join(base_dir, mod_uuid.v4());
-
-	/* for dir creation */
-	var dir_path = mod_path.join(mds.mds_path_small, mod_uuid.v4(),
-	    mod_uuid.v4());
+	mod_assertplus.uuid(uuid);
 
 	op = {
 	    'mp_base_dir': base_dir,
@@ -332,40 +334,77 @@ function mdsShovelOperation(mds)
 	    'nfailures': mds.mds_nops_fail
 	}, 'beginning operation');
 
+	var dirOne = mod_path.join(mds.mds_path_large, uuid.substr(0,4));
+	var dirTwo = mod_path.join(dirone, uuid.substr(4,8));
+	var obj = mod_path.join(dirtwo, uuid);
+
 	/*
-	 * Workload is:
-	 *
-	 * upload object:
-	 * - getobject (check for existence)
-	 * - getobject (check manta_directory_counts of parent)
-	 * - putobject (actually create the object)
-	 *
-	 * create directory:
-	 * - getobject (see if it exists)
-	 * - putobject (create directory)
-	 *
+	 * Intended to simulate the Muskie getMetadata handler.
 	 */
+	function mdsOpResolveMetadata(path, cb) {
+		var dirname = mod_path.dirname(path);
+
+		mod_vasync.parallel(
+			funcs: [
+				function (callback) {
+					mdsGetObject(mds, uuid, dirname, callback);
+				},
+				function (callback) {
+					mdsGetObject(mds, uuid, path, callback);
+				}
+			],
+			function (err, results) {
+				cb(err);
+			}
+		);
+	}
+
+	/*
+	 * Simulates the metadata parts of a muskie putdirectory route.
+	 */
+	function mdsOpSimulatePutDirectory(path, cb) {
+		mod_vasync.waterfall([
+			function mdsGetMetadata(callback) {
+				mdsOpResolveMetadata(path, callback);
+			},
+			function mdsDoPutdirectory(callback) {
+				mdsCreateDirectory(mds, uuid, path, callback);	
+			}
+		], function (err, results) {
+			cb(err);
+		});
+	}
+
+	/*
+	 * Simulates the metadata parts of a muskie putobject route.
+	 */
+	function mdsOpSimulatePutObject(path, cb) {
+		var dirname = mod_path.dirname(path);
+		mod_vasync.waterfall([
+			function mdsGetMetadata(callback) {
+				mdsOpResolveMetadata(path, callback);
+			},
+			function mdsEnforceDirectoryCount(callback) {
+				mdsGetDirCount(mds, uuid, dirname, callback);
+			},
+			function mdsDoPutobject(callback) {
+				mdsCreateObject(mds, uuid, path, callback);
+			}
+		], function (err, results) {
+			cb(err);
+		});
+	}
+
 	op.mp_pipeline = mod_vasync.waterfall([
-	    function mdsOpCheckObjExists(callback) {
-		mdsGetObject(mds, uuid, full_path, callback);
-	    },
-
-	    function mdsOpCheckDirents(callback) {
-		mdsGetDirCount(mds, uuid, base_dir, callback);
-	    },
-
-	    function mdsOpCreateDirent(callback) {
-		mdsCreateObject(mds, uuid, full_path, callback);
-	    },
-
-	    function mdsOpCheckDirExists(callback) {
-		mdsGetObject(mds, uuid, dir_path, callback);
-	    },
-
-	    function mdsOpCreateDir(callback) {
-		mdsCreateDirectory(mds, uuid, dir_path, callback);
-	    }
-
+		function (callback) {
+			mdsOpSimulatePutDirectory(dirOne, callback);
+		},
+		function (callback) {
+			mdsOpSimulatePutDirectory(dirTwo, callback);
+		},
+		function (callback) {
+			mdsOpSimulatePutObject(obj, callback);
+		}
 	], function (err) {
 		var latms;
 
