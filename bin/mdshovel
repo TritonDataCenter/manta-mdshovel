@@ -314,6 +314,14 @@ function mdsShovelOperation(mds)
 	uuid = mod_uuid.v4();
 	mod_assertplus.uuid(uuid);
 
+	var base_dir = mod_path.join(mds.mds_path_large, mod_uuid.v4(),
+	    mod_uuid.v4());
+	var full_path = mod_path.join(base_dir, mod_uuid.v4());
+
+	/* for dir creation */
+	var dir_path = mod_path.join(mds.mds_path_small, mod_uuid.v4(),
+	    mod_uuid.v4());
+
 	op = {
 	    'mp_base_dir': base_dir,
 	    'mp_full_path': full_path,
@@ -335,8 +343,8 @@ function mdsShovelOperation(mds)
 	}, 'beginning operation');
 
 	var dirOne = mod_path.join(mds.mds_path_large, uuid.substr(0,4));
-	var dirTwo = mod_path.join(dirone, uuid.substr(4,8));
-	var obj = mod_path.join(dirtwo, uuid);
+	var dirTwo = mod_path.join(dirOne, uuid.substr(4,8));
+	var obj = mod_path.join(dirTwo, uuid);
 
 	/*
 	 * Intended to simulate the Muskie getMetadata handler.
@@ -344,7 +352,7 @@ function mdsShovelOperation(mds)
 	function mdsOpResolveMetadata(path, cb) {
 		var dirname = mod_path.dirname(path);
 
-		mod_vasync.parallel(
+		mod_vasync.parallel({
 			funcs: [
 				function (callback) {
 					mdsGetObject(mds, uuid, dirname, callback);
@@ -353,10 +361,10 @@ function mdsShovelOperation(mds)
 					mdsGetObject(mds, uuid, path, callback);
 				}
 			],
-			function (err, results) {
-				cb(err);
-			}
-		);
+		},
+		function (err, results) {
+			cb(err);
+		});
 	}
 
 	/*
@@ -404,6 +412,9 @@ function mdsShovelOperation(mds)
 		},
 		function (callback) {
 			mdsOpSimulatePutObject(obj, callback);
+		},
+		function (callback) {
+			mdsGetObject(mds, uuid, obj, callback);
 		}
 	], function (err) {
 		var latms;
