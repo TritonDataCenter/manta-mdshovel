@@ -376,7 +376,7 @@ function mdsShovelOperation(mds)
 				mdsOpResolveMetadata(path, callback);
 			},
 			function mdsDoPutdirectory(callback) {
-				mdsCreateDirectory(mds, uuid, path, callback);	
+				mdsCreateDirectory(mds, uuid, path, callback);
 			}
 		], function (err, results) {
 			cb(err);
@@ -403,6 +403,11 @@ function mdsShovelOperation(mds)
 		});
 	}
 
+	/*
+	 * The sequence below is contrived. Its purpose is to achieve
+	 * the expected ratio of getobject:putobject operations in Moray
+	 * given the forecast of a thumbnail-based SPC workload.
+	 */
 	op.mp_pipeline = mod_vasync.waterfall([
 		function (callback) {
 			mdsOpSimulatePutDirectory(dirOne, callback);
@@ -414,7 +419,19 @@ function mdsShovelOperation(mds)
 			mdsOpSimulatePutObject(obj, callback);
 		},
 		function (callback) {
+			mdsOpSimulatePutObject(obj + 'other', callback);
+		},
+		function (callback) {
 			mdsGetObject(mds, uuid, obj, callback);
+		},
+		function (callback) {
+			mdsGetObject(mds, uuid, obj + 'other' , callback);
+		},
+		function (callback) {
+			mdsGetObject(mds, uuid, dirTwo, callback);
+		},
+		function (callback) {
+			mdsGetObject(mds, uuid, dirOne, callback);
 		}
 	], function (err) {
 		var latms;
