@@ -60,7 +60,7 @@ var mdsConfigSchema = {
 	    'type': 'number',
 	    'required': true,
 	    'minimum': 1,
-	    'maximum': 8192
+	    'maximum': 10000
 	},
 	'largeDirectory': {
 	    'type': 'string',
@@ -284,13 +284,32 @@ function mdsShovel(mds)
 				mod_cmdutil.fail(err);
 			}
 
-			mod_assertplus.notStrictEqual(mds.mds_mdclient, null);
-			max = mds.mds_max_concurrency;
-			mod_assertplus.number(max);
-			mod_assertplus.ok(max > 0);
-			for (i = 0; i < mds.mds_max_concurrency; i++) {
-				mdsShovelOperation(mds);
-			}
+			mod_vasync.pipeline({
+				funcs: [
+					function (_, callback) {
+						mdsCreateDirectory(mds, mod_uuid.v4(),
+						    mds.mds_path_large, callback);
+					},
+					function (_, callback) {
+						mdsCreateDirectory(mds, mod_uuid.v4(),
+						    mds.mds_path_small, callback);
+					}
+				]
+			}, function (err, _) {
+				if (err) {
+					mds.mds_log.error({
+						err: err.message
+					}, 'error create small/large path');
+					process.exit(1);
+				}
+				mod_assertplus.notStrictEqual(mds.mds_mdclient, null);
+				max = mds.mds_max_concurrency;
+				mod_assertplus.number(max);
+				mod_assertplus.ok(max > 0);
+				for (i = 0; i < mds.mds_max_concurrency; i++) {
+					mdsShovelOperation(mds);
+				}
+			});
 		});
 	});
 }
@@ -342,23 +361,24 @@ function mdsShovelOperation(mds)
 	    'nfailures': mds.mds_nops_fail
 	}, 'beginning operation');
 
-	var dirOne = mod_path.join(mds.mds_path_large, uuid.substr(0,4));
-	var dirTwo = mod_path.join(dirOne, uuid.substr(4,8));
-	var obj = mod_path.join(dirTwo, uuid);
 
 	/*
 	 * Intended to simulate the Muskie getMetadata handler.
 	 */
-	function mdsOpResolveMetadata(path, cb) {
+	function mdsOpResolveMetadata(path, uuid, cb) {
 		var dirname = mod_path.dirname(path);
-
+		/*
+		 * We don't want to overload the primary with ROLLBACK requests,
+		 * so we resolve the parent twice, instead of trying to resolve the
+		 * (possibly non-existent) child.
+		 */
 		mod_vasync.parallel({
 			funcs: [
 				function (callback) {
 					mdsGetObject(mds, uuid, dirname, callback);
 				},
 				function (callback) {
-					mdsGetObject(mds, uuid, path, callback);
+					mdsGetObject(mds, uuid, dirname, callback);
 				}
 			],
 		},
@@ -370,10 +390,10 @@ function mdsShovelOperation(mds)
 	/*
 	 * Simulates the metadata parts of a muskie putdirectory route.
 	 */
-	function mdsOpSimulatePutDirectory(path, cb) {
+	function mdsOpSimulatePutDirectory(path, uuid, cb) {
 		mod_vasync.waterfall([
 			function mdsGetMetadata(callback) {
-				mdsOpResolveMetadata(path, callback);
+				mdsOpResolveMetadata(path, uuid, callback);
 			},
 			function mdsDoPutdirectory(callback) {
 				mdsCreateDirectory(mds, uuid, path, callback);	
@@ -386,35 +406,69 @@ function mdsShovelOperation(mds)
 	/*
 	 * Simulates the metadata parts of a muskie putobject route.
 	 */
-	function mdsOpSimulatePutObject(path, cb) {
+	function mdsOpSimulatePutObject(path, uuid, cb) {
 		var dirname = mod_path.dirname(path);
 		mod_vasync.waterfall([
 			function mdsGetMetadata(callback) {
-				mdsOpResolveMetadata(path, callback);
-			},
-			function mdsEnforceDirectoryCount(callback) {
-				mdsGetDirCount(mds, uuid, dirname, callback);
+				mdsOpResolveMetadata(path, uuid, callback);
 			},
 			function mdsDoPutobject(callback) {
 				mdsCreateObject(mds, uuid, path, callback);
+			},
+			function mdsEnforceDirectoryCount(callback) {
+				mdsGetDirCount(mds, uuid, dirname, callback);
 			}
 		], function (err, results) {
 			cb(err);
 		});
 	}
 
+	/* Each thumbnail upload will create two parent directories, as it does in SPC */
+	function simulateThumbnailUpload(objectPath, uuid, callback) {
+		var parentDir = mod_path.dirname(objectPath);
+		var grandParentDir = mod_path.dirname(parentDir);
+
+		mod_vasync.waterfall([
+			function (callback) {
+				mdsOpSimulatePutDirectory(grandParentDir, uuid, callback);
+			},
+			function (callback) {
+				mdsOpSimulatePutDirectory(parentDir, uuid, callback);
+			},
+			function (callback) {
+				mdsOpSimulatePutObject(objectPath, uuid, callback);
+			}
+		], function (err) {
+			callback(err);
+		});
+	}
+
+	/* Generate uuid and parameters for thumbnail upload. */
+	function uploadThumbnail(callback) {
+		var uuid = mod_uuid.v4();
+		var uuid_components = uuid.split('-');
+		
+		var dirOne = mod_path.join(mds.mds_path_large, uuid_components[0].substr(0,4)) 
+		var dirTwo = mod_path.join(dirOne, uuid_components[1]);
+		var obj = mod_path.join(dirTwo, uuid);
+
+		simulateThumbnailUpload(obj, uuid, function (err) {
+			callback(err, uuid, obj);
+		});
+	}
+
 	op.mp_pipeline = mod_vasync.waterfall([
 		function (callback) {
-			mdsOpSimulatePutDirectory(dirOne, callback);
+			uploadThumbnail(callback);
 		},
-		function (callback) {
-			mdsOpSimulatePutDirectory(dirTwo, callback);
+		function (_, _, callback) {
+			uploadThumbnail(callback);
 		},
-		function (callback) {
-			mdsOpSimulatePutObject(obj, callback);
+		function (_, _, callback) {
+			uploadThumbnail(callback);
 		},
-		function (callback) {
-			mdsGetObject(mds, uuid, obj, callback);
+		function (lastUuid, lastThumbnail, callback) {
+			mdsGetObject(mds, lastUuid, lastThumbnail, callback);
 		}
 	], function (err) {
 		var latms;
@@ -506,7 +560,7 @@ function mdsCreateDirectory(mds, reqid, path, callback)
 	    'requestId': reqid,
 	    'roles': [],
 	    'type': 'directory',
-	    '_etag': null
+	    '_etag': undefined
 	}, function (err) {
 		if (err && VError.hasCauseWithName(err, 'EtagConflictError')) {
 			err = null;
@@ -531,7 +585,7 @@ function mdsCreateObject(mds, reqid, path, callback)
 	    'requestId': reqid,
 	    'roles': [],
 	    'type': 'directory',
-	    '_etag': null,
+	    '_etag': undefined,
 	    'contentLength': 0,
 	    'contentMD5': 'invalid-md5-sum',
 	    'contentType': 'application/octet-stream',
