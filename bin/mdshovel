@@ -86,7 +86,8 @@ function main()
 
 	log = new mod_bunyan({
 	    'name': 'mdshovel',
-	    'level': process.env['LOG_LEVEL'] || 'fatal'
+	    //'level': process.env['LOG_LEVEL'] || 'fatal'
+	    'level': process.env['LOG_LEVEL'] || 'info'
 	});
 
 	mod_cmdutil.configure({
@@ -160,11 +161,11 @@ function mdsConfigLoadFromFile(args, callback)
 			return;
 		}
 
-		error = mod_jsprim.validateJsonObject(mdsConfigSchema, json);
-		if (error instanceof Error) {
-			callback(new VError(error, 'validate "%s"', filename));
-			return;
-		}
+		//error = mod_jsprim.validateJsonObject(mdsConfigSchema, json);
+		//if (error instanceof Error) {
+			//callback(new VError(error, 'validate "%s"', filename));
+			//return;
+		//}
 
 		callback(null, new Mds({
 		    'filename': filename,
@@ -245,6 +246,9 @@ function Mds(args)
 	});
 
 	/* simple counters */
+    this.mds_c_nstarted.add(0);
+    this.mds_c_ndone.add(0);
+    this.mds_c_nfail.add(0);
 	this.mds_nops_started = 0;	/* operations started */
 	this.mds_nops_done = 0;		/* operations completed */
 	this.mds_nops_fail = 0;		/* operations failed */
@@ -277,7 +281,8 @@ function mdsShovel(mds)
 		var i, max;
 
 		mds.mds_mdclient_ready = new Date();
-		mds.mds_log.info('connected to the metadata tier');
+		//mds.mds_log.info('connected to the metadata tier');
+		mds.mds_log.error('connected to the metadata tier');
 
 		mdsArtediStart(mds, function (err) {
 			if (err) {
