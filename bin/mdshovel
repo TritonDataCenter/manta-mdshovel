@@ -42,33 +42,11 @@ var mdsUsageMessage = [
 var mdsConfigSchema = {
     'type': 'object',
     'properties': {
-	'metadataService': {
-	    'type': 'object',
-	    'required': true,
-	    'properties': {
-		'srvDomain': {
-		    'type': 'string',
-		    'required': true
-		},
-		'cueballOptions': {
-		    'type': 'object',
-		    'required': true
-		}
-	    }
-	},
 	'concurrency': {
 	    'type': 'number',
 	    'required': true,
 	    'minimum': 1,
 	    'maximum': 128
-	},
-	'largeDirectory': {
-	    'type': 'string',
-	    'required': true
-	},
-	'smallDirectoryRoot': {
-	    'type': 'string',
-	    'required': true
 	},
 	'artediPort': {
 	    'type': 'number',
@@ -166,13 +144,6 @@ function mdsConfigLoadFromFile(args, callback)
 			return;
 		}
 
-		suffix = mod_path.basename(json.largeDirectory);
-		if (suffix.length != 1) {
-			callback(new VError('"largeDirectory" should refer ' +
-			    'to a directory whose basename is 1 character'));
-			return;
-		}
-
 		callback(null, new Mds({
 		    'filename': filename,
 		    'dryRun': dryrun,
@@ -200,10 +171,7 @@ function Mds(args)
 	this.mds_config_raw = args.configRaw;
 	this.mds_max_concurrency = args.configRaw.concurrency;
 	this.mds_port = args.configRaw.artediPort;
-	this.mds_path_large = args.configRaw.largeDirectory;
-	this.mds_path_small = args.configRaw.smallDirectoryRoot;
-	this.mds_uuid_pfx = mod_path.basename(
-	    this.mds_config_raw.largeDirectory);
+	this.mds_vnodes = args.configRaw.vnodes;
 	this.mds_dryrun = args.dryRun;
 
 	/* runtime state */
@@ -266,7 +234,7 @@ function mdsShovel(mds)
 	    'dryRun': mds.mds_dryrun
 	}, 'init');
 
-	mds.mds_mdclient = mod_libmanta.createMorayClient({
+	mds.mds_mdclient = mod_libmanta.createMorayBucketClient({
 	    'log': mds.mds_log.child({ 'component': 'libmanta.Moray' }),
 	    'morayOptions': mds.mds_config_raw.metadataService
 	});
@@ -305,20 +273,10 @@ function mdsShovelOperation(mds)
 {
 	var uuid, op;
 
-	/*
-	 * The workload that we're simulating uses general uuids, but shards
-	 * them over 16 metadata directories based on the first character of the
-	 * uuid.  To reproduce the problem faster, we want to concentrate all of
-	 * our work on one of these directories, as though all uuids started
-	 * with the same letter.  Since we're faking up metadata anyway, it
-	 * doesn't matter if our uuid really starts with that letter, but it
-	 * will be a little less confusing this way.
-	 */
-	uuid = mds.mds_uuid_pfx + mod_uuid.v4().substr(mds.mds_uuid_pfx.length);
-	mod_assertplus.uuid(uuid);
+	uuid = mod_uuid.v4();
 
 	op = {
-	    'mp_uuid': uuid,
+	    'mp_name': uuid,
 	    'mp_pipeline': null,
 	    'mp_start_walltime': new Date(),
 	    'mp_start_hrtime': process.hrtime(),
@@ -336,26 +294,9 @@ function mdsShovelOperation(mds)
 	}, 'beginning operation');
 
 	op.mp_pipeline = mod_vasync.waterfall([
-	    function mdsOpCreateLargeEntry(callback) {
-		var path = mod_path.join(mds.mds_path_large, uuid);
-		mdsCreateDirectory(mds, uuid, path, callback);
-	    },
-
-	    function mdsOpCreateSmallEntryOne(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2));
-		mdsCreateDirectory(mds, uuid, path, callback);
-	    },
-
-	    function mdsOpCreateSmallEntryTwo(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16));
-		mdsCreateDirectory(mds, uuid, path, callback);
-	    },
-
-	    function mdsOpCreateSmallEntryLeaf(callback) {
-		var path = mod_path.join(mds.mds_path_small, uuid.substr(0, 2),
-		    uuid.substr(0, 16), uuid);
-		mdsCreateObject(mds, uuid, path, callback);
+	    function mdsOpCreateBucketObject(callback) {
+		var vnode = mds.mds_vnodes[Math.floor(Math.random() * mds.mds_vnodes.length)];
+		mdsCreateBucketObject(mds, uuid, uuid, vnode, callback);
 	    }
 	], function (err) {
 		var latms;
@@ -444,6 +385,27 @@ function mdsCreateObject(mds, reqid, path, callback)
 	}, callback);
 }
 
+function mdsCreateBucketObject(mds, reqid, name, vnode, callback)
+{
+	mdsCreateEntry(mds, 'put', {
+	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
+	    'bucket_id': mod_uuid.v4(),
+	    'key': mod_uuid.v4(),
+	    'name': name,
+	    'vnode': vnode,
+	    'content_length': 0,
+	    'content_md5': 'NjA0NTYyYTktMzE5Yi00Mzk1LTgzYzEtMjA2MDlhNjcwNTY0',
+	    'content_type': 'application/octet-stream',
+	    'headers': {},
+	    'sharks': {
+		'invalid-0': '0.invalid',
+		'invalid-1': '1.invalid'
+	    },
+	    'props': {},
+	    'log': mds.mds_log
+	}, callback);
+}
+
 /*
  * Lowest-level function for creating a Manta metadata entry.  The caller
  * provides "metadata", the actual metadata, which should be valid metadata for
@@ -468,7 +430,7 @@ function mdsCreateEntry(mds, opname, metadata, callback)
 	}
 
 	var start = process.hrtime();
-	mds.mds_mdclient.putMetadata(metadata, function (err) {
+	mds.mds_mdclient.putObject(metadata, function (err) {
 		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
 		mds.mds_hist_putmd.observe(latms);
 
