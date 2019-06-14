@@ -21,7 +21,7 @@ var mod_cmdutil = require('cmdutil');
 var mod_fs = require('fs');
 var mod_getopt = require('posix-getopt');
 var mod_jsprim = require('jsprim');
-var mod_libmanta = require('libmanta');
+var mod_boray = require('boray');
 var mod_http = require('http');
 var mod_path = require('path');
 var mod_uuid = require('node-uuid');
@@ -234,8 +234,8 @@ function mdsShovel(mds)
 	    'dryRun': mds.mds_dryrun
 	}, 'init');
 
-	mds.mds_mdclient = mod_libmanta.createMorayBucketClient({
-	    'log': mds.mds_log.child({ 'component': 'libmanta.Moray' }),
+	mds.mds_mdclient = mod_boray.createClient({
+	    'log': mds.mds_log.child({ 'component': 'boray' }),
 	    'morayOptions': mds.mds_config_raw.metadataService
 	});
 
@@ -430,7 +430,10 @@ function mdsCreateEntry(mds, opname, metadata, callback)
 	}
 
 	var start = process.hrtime();
-	mds.mds_mdclient.putObject(metadata, function (err) {
+	mds.mds_mdclient.createObjectNoVnode(metadata.owner, metadata.bucket_id,
+	    metadata.name, metadata.key, metadata.content_length,
+	    metadata.content_md5, metadata.content_type, metadata.headers,
+	    metadata.sharks, metadata.props, function (err) {
 		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
 		mds.mds_hist_putmd.observe(latms);
 
