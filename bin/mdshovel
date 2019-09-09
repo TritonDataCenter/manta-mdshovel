@@ -289,14 +289,6 @@ function mdsShovelOperation(mds)
 	uuid = mod_uuid.v4();
 	mod_assertplus.uuid(uuid);
 
-	var base_dir = mod_path.join(mds.mds_path_large, mod_uuid.v4(),
-	    mod_uuid.v4());
-	var full_path = mod_path.join(base_dir, mod_uuid.v4());
-
-	/* for dir creation */
-	var dir_path = mod_path.join(mds.mds_path_small, mod_uuid.v4(),
-	    mod_uuid.v4());
-
 	op = {
 	    'mp_name': uuid,
 	    'mp_pipeline': null,
@@ -315,75 +307,10 @@ function mdsShovelOperation(mds)
 	    'nfailures': mds.mds_nops_fail
 	}, 'beginning operation');
 
-	var dirOne = mod_path.join(mds.mds_path_large, uuid.substr(0,4));
-	var dirTwo = mod_path.join(dirOne, uuid.substr(4,8));
-	var obj = mod_path.join(dirTwo, uuid);
-
-	/*
-	 * Intended to simulate the Muskie getMetadata handler.
-	 */
-	function mdsOpResolveMetadata(path, cb) {
-		var dirname = mod_path.dirname(path);
-
-		mod_vasync.parallel({
-			funcs: [
-				function (callback) {
-					mdsGetObject(mds, uuid, dirname, callback);
-				},
-				function (callback) {
-					mdsGetObject(mds, uuid, path, callback);
-				}
-			],
-		},
-		function (err, results) {
-			cb(err);
-		});
-	}
-
-	/*
-	 * Simulates the metadata parts of a muskie putdirectory route.
-	 */
-	function mdsOpSimulatePutDirectory(path, cb) {
-		mod_vasync.waterfall([
-			function mdsGetMetadata(callback) {
-				mdsOpResolveMetadata(path, callback);
-			},
-			function mdsDoPutdirectory(callback) {
-				mdsCreateDirectory(mds, uuid, path, callback);
-			}
-		], function (err, results) {
-			cb(err);
-		});
-	}
-
-	/*
-	 * Simulates the metadata parts of a muskie putobject route.
-	 */
-	function mdsOpSimulatePutObject(path, cb) {
-		var dirname = mod_path.dirname(path);
-		mod_vasync.waterfall([
-			function mdsGetMetadata(callback) {
-				mdsOpResolveMetadata(path, callback);
-			},
-			function mdsEnforceDirectoryCount(callback) {
-				mdsGetDirCount(mds, uuid, dirname, callback);
-			},
-			function mdsDoPutobject(callback) {
-				mdsCreateObject(mds, uuid, path, callback);
-			}
-		], function (err, results) {
-			cb(err);
-		});
-	}
-
-	/*
-	 * The sequence below is contrived. Its purpose is to achieve
-	 * the expected ratio of getobject:putobject operations in Moray
-	 * given the forecast of a thumbnail-based SPC workload.
-	 */
 	op.mp_pipeline = mod_vasync.waterfall([
 	    function mdsOpCreateBucketObject(callback) {
-		var vnode = mds.mds_vnodes[Math.floor(Math.random() * mds.mds_vnodes.length)];
+		var vnode = mds.mds_vnodes[
+		    Math.floor(Math.random() * mds.mds_vnodes.length)];
 		mdsCreateBucketObject(mds, uuid, uuid, vnode, callback);
 	    }
 	], function (err) {
@@ -421,101 +348,9 @@ function mdsShovelOperation(mds)
 	});
 }
 
-/*
- * Retrieves metadata for the object at "path".  In dry-run mode, this does
- * nothing.
- */
-function mdsGetObject(mds, reqid, path, callback)
-{
-	mdsDoOp(mds, 'get', {
-		'key': path,
-		'requestId': reqid
-	}, function (err) {
-		if (err &&
-		    VError.findCauseByName(err, 'ObjectNotFoundError')
-		    !== null) {
-
-			err = null;
-		}
-		callback(err);
-	});
-}
-
-/*
- * Retrieves the number of entries in the given "path" directory.  In dry-run
- * mode this does nothing.
- */
-function mdsGetDirCount(mds, reqid, path, callback)
-{
-	mdsDoOp(mds, 'count', {
-		'directory': path,
-		'requestId': reqid
-	}, function (err) {
-		if (err &&
-		    VError.findCauseByName(err, 'ObjectNotFoundError')
-		    !== null) {
-
-			err = null;
-		}
-		callback(err);
-	});
-}
-
-/*
- * Creates metadata for a directory at "path".  In dry-run mode, this does
- * nothing.
- */
-function mdsCreateDirectory(mds, reqid, path, callback)
-{
-	mdsDoOp(mds, 'mkdir', {
-	    'dirname': mod_path.dirname(path),
-	    'key': path,
-	    'headers': {},
-	    'mtime': Date.now(),
-	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
-	    'requestId': reqid,
-	    'roles': [],
-	    'type': 'directory',
-	    '_etag': null
-	}, function (err) {
-		if (err && VError.hasCauseWithName(err, 'EtagConflictError')) {
-			err = null;
-		}
-
-		callback(err);
-	});
-}
-
-/*
- * Creates metadata for an object at "path".  In dry-run mode, this does
- * nothing.
- */
-function mdsCreateObject(mds, reqid, path, callback)
-{
-	mdsDoOp(mds, 'put', {
-	    'dirname': mod_path.dirname(path),
-	    'key': path,
-	    'headers': {},
-	    'mtime': Date.now(),
-	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
-	    'requestId': reqid,
-	    'roles': [],
-	    'type': 'directory',
-	    '_etag': null,
-	    'contentLength': 0,
-	    'contentMD5': 'invalid-md5-sum',
-	    'contentType': 'application/octet-stream',
-	    'objectId': reqid,
-	    'sharks': [ {
-		'datacenter': 'invalid_dc',
-		'manta_storage_id': 'invalid_shark'
-	    } ]
-	}, callback);
-}
-
 function mdsCreateBucketObject(mds, reqid, name, vnode, callback)
 {
-	mdsCreateEntry(mds, 'put', {
+	mdsDoOp(mds, 'put', {
 	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
 	    'bucket_id': mod_uuid.v4(),
 	    'key': mod_uuid.v4(),
@@ -563,7 +398,6 @@ function mdsDoOp(mds, opname, metadata, callback)
 	    metadata.name, metadata.key, metadata.content_length,
 	    metadata.content_md5, metadata.content_type, metadata.headers,
 	    metadata.sharks, metadata.props, function (err) {
-	function done(err) {
 		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
 		mds.mds_hist_md.observe(latms, {
 		    'operation': opname
@@ -577,21 +411,7 @@ function mdsDoOp(mds, opname, metadata, callback)
 		}
 
 		callback(err);
-	}
-
-	var start = process.hrtime();
-	switch (opname) {
-		case 'count':
-			mds.mds_mdclient.getDirectoryCount(metadata, done);
-			break;
-		case 'get':
-			mds.mds_mdclient.getMetadata(metadata, done);
-			break;
-		default:
-			mds.mds_mdclient.putMetadata(metadata, done);
-			break;
-	}
-
+	});
 }
 
 /*
