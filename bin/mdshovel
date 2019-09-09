@@ -238,10 +238,11 @@ function mdsShovel(mds)
 	    'dryRun': mds.mds_dryrun
 	}, 'init');
 
-	mds.mds_mdclient = mod_boray.createClient({
-	    'log': mds.mds_log.child({ 'component': 'boray' }),
-	    'morayOptions': mds.mds_config_raw.metadataService
-	});
+	mds.mds_config_raw.metadataService.log = mds.mds_log;
+	mds.mds_config_raw.metadataService.crc_mode = 0x3;
+	mds.mds_mdclient = mod_boray.createClient(
+	    mds.mds_config_raw.metadataService
+	);
 
 	mds.mds_mdclient.on('error', function onMetadataClientError(err) {
 		mod_cmdutil.fail(new VError(
@@ -356,14 +357,18 @@ function mdsCreateBucketObject(mds, reqid, name, vnode, callback)
 	    'key': mod_uuid.v4(),
 	    'name': name,
 	    'vnode': vnode,
+	    'requestId': reqid,
 	    'content_length': 0,
 	    'content_md5': 'NjA0NTYyYTktMzE5Yi00Mzk1LTgzYzEtMjA2MDlhNjcwNTY0',
 	    'content_type': 'application/octet-stream',
 	    'headers': {},
-	    'sharks': {
-		'invalid-0': '0.invalid',
-		'invalid-1': '1.invalid'
-	    },
+	    'sharks': [ {
+		'datacenter': 'invalid-0',
+		'manta_storage_id': '0.invalid'
+	    }, {
+		'datacenter': 'invalid-1',
+		'manta_storage_id': '1.invalid'
+	    } ],
 	    'props': {},
 	    'log': mds.mds_log
 	}, callback);
@@ -394,10 +399,11 @@ function mdsDoOp(mds, opname, metadata, callback)
 	}
 
 	var start = process.hrtime();
-	mds.mds_mdclient.createObjectNoVnode(metadata.owner, metadata.bucket_id,
+	mds.mds_mdclient.createObject(metadata.owner, metadata.bucket_id,
 	    metadata.name, metadata.key, metadata.content_length,
 	    metadata.content_md5, metadata.content_type, metadata.headers,
-	    metadata.sharks, metadata.props, function (err) {
+	    metadata.sharks, metadata.props, metadata.vnode,
+	    metadata.requestId, function (err) {
 		var latms = mod_jsprim.hrtimeMillisec(process.hrtime(start));
 		mds.mds_hist_md.observe(latms, {
 		    'operation': opname

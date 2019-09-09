@@ -1,9 +1,9 @@
 {
 	"metadataService": {
-		"host": "172.26.14.25",
+		"host": "10.99.99.60",
 		"port": 2030
 	},
-	"vnodes": [ 1, 3, 5, 7 ],
+	"vnodes": [ 0, 2 ],
 	"concurrency": 1,
 	"artediPort": 9876
 }
