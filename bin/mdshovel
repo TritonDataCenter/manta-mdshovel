@@ -445,7 +445,7 @@ function mdsFinish(mds) {
 	mds.mds_log.info({
 	    'nobjects': mds.mds_c_nsuccess.getValue()
 	}, 'finish');
-	process.exit(1);
+	process.exit();
 }
 
 /*
