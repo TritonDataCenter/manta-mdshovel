@@ -4,6 +4,6 @@
 		"port": 2030
 	},
 	"vnodes": [ 0, 2 ],
-	"concurrency": 1,
+	"concurrency": 5,
 	"artediPort": 9876
 }

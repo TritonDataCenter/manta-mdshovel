@@ -60,11 +60,11 @@ var mdsConfigSchema = {
 function main()
 {
 	var parser, option, argv;
-	var log, cfgfile, dryrun;
+	var log, cfgfile, dryrun, nobjects;
 
 	log = new mod_bunyan({
 	    'name': 'mdshovel',
-	    'level': process.env['LOG_LEVEL'] || 'fatal'
+	    'level': process.env['LOG_LEVEL'] || 'info'
 	});
 
 	mod_cmdutil.configure({
@@ -73,11 +73,15 @@ function main()
 	});
 
 	dryrun = false;
-	parser = new mod_getopt.BasicParser('n', process.argv);
+	nobjects = Infinity;
+	parser = new mod_getopt.BasicParser('no:', process.argv);
 	while ((option = parser.getopt()) !== undefined) {
 		switch (option.option) {
 		case 'n':
 			dryrun = true;
+			break;
+		case 'o':
+			nobjects = mod_jsprim.parseInteger(option.optarg);
 			break;
 
 		default:
@@ -97,6 +101,7 @@ function main()
 	mdsConfigLoadFromFile({
 	    'log': log,
 	    'dryRun': dryrun,
+	    'nobjects': nobjects,
 	    'filename': cfgfile
 	}, function (err, mds) {
 		if (err) {
@@ -113,16 +118,19 @@ function main()
  */
 function mdsConfigLoadFromFile(args, callback)
 {
-	var log, filename, dryrun;
+	var log, filename, dryrun, nobjects;
 
 	mod_assertplus.object(args, 'args');
 	mod_assertplus.string(args.filename, 'args.filename');
 	mod_assertplus.object(args.log, 'args.log');
 	mod_assertplus.bool(args.dryRun, 'args.dryRun');
+	mod_assertplus.number(args.nobjects, 'args.nobjects');
 
 	filename = args.filename;
 	log = args.log;
 	dryrun = args.dryRun;
+	nobjects = args.nobjects;
+
 	mod_fs.readFile(filename, function (err, filebytes) {
 		var json, error, suffix;
 
@@ -147,6 +155,7 @@ function mdsConfigLoadFromFile(args, callback)
 		callback(null, new Mds({
 		    'filename': filename,
 		    'dryRun': dryrun,
+		    'nobjects': nobjects,
 		    'log': log,
 		    'configRaw': json
 		}));
@@ -165,6 +174,7 @@ function Mds(args)
 	mod_assertplus.object(args.log, 'args.log');
 	mod_assertplus.object(args.configRaw, 'args.configRaw');
 	mod_assertplus.bool(args.dryRun, 'args.dryRun');
+	mod_assertplus.number(args.nobjects, 'args.nobjects');
 
 	/* static configuration */
 	this.mds_config_filename = args.filename;
@@ -173,6 +183,7 @@ function Mds(args)
 	this.mds_port = args.configRaw.artediPort;
 	this.mds_vnodes = args.configRaw.vnodes;
 	this.mds_dryrun = args.dryRun;
+	this.mds_nobjects_target = args.nobjects;
 
 	/* runtime state */
 
@@ -205,11 +216,14 @@ function Mds(args)
 	    'name': 'nfail',
 	    'help': 'count of composite operations that have failed'
 	});
+	this.mds_c_nsuccess = this.mds_artedi.counter({
+	    'name': 'nsuccess',
+	    'help': 'count of composite operations that have succeeded'
+	});
 	this.mds_c_op_done = this.mds_artedi.counter({
 	    'name': 'nopdone',
 	    'help': 'count of discrete metadata operations finished'
 	});
-
 	this.mds_hist_op = this.mds_artedi.histogram({
 	    'name': 'composite_latency_ms',
 	    'help': 'latency of composite operations'
@@ -343,6 +357,13 @@ function mdsShovelOperation(mds)
 			mds.mds_c_nfail.increment();
 			err = new VError(err, 'operation failed');
 			mds.mds_log.warn(err);
+		} else {
+			mds.mds_c_nsuccess.increment();
+
+			if (mds.mds_c_nsuccess.getValue() ===
+			    mds.mds_nobjects_target) {
+				mdsFinish(mds);
+			}
 		}
 
 		mdsShovelOperation(mds);
@@ -418,6 +439,13 @@ function mdsDoOp(mds, opname, metadata, callback)
 
 		callback(err);
 	});
+}
+
+function mdsFinish(mds) {
+	mds.mds_log.info({
+	    'nobjects': mds.mds_c_nsuccess.getValue()
+	}, 'finish');
+	process.exit(1);
 }
 
 /*
