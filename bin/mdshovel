@@ -374,7 +374,7 @@ function mdsCreateBucketObject(mds, reqid, name, vnode, callback)
 {
 	mdsDoOp(mds, 'put', {
 	    'owner': 'e9c7b8f7-f51a-43ed-a159-f109da7d3162',
-	    'bucket_id': mod_uuid.v4(),
+	    'bucket_id': '4c59d6c4-d495-11e9-b86b-4fcb99cb2c8a',
 	    'key': mod_uuid.v4(),
 	    'name': name,
 	    'vnode': vnode,
