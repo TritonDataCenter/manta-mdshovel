@@ -15,7 +15,7 @@
 		"kang": "^1.2.0",
 		"libmanta": "1.4.0",
 		"manta": "^5.1.0",
-		"node-uuid": "1.4.0",
+		"node-uuid": "1.4.8",
 		"posix-getopt": "^1.2.0",
 		"vasync": "^2.1.0",
 		"verror": "^1.10.0"
